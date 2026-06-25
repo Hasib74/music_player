@@ -1,21 +1,28 @@
+import 'dart:io';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:just_audio/just_audio.dart';
 import 'package:youtube_explode_dart/youtube_explode_dart.dart';
 import 'package:cached_network_image/cached_network_image.dart';
-import 'package:youtube_player_iframe/youtube_player_iframe.dart' hide PlayerState;
-import 'package:permission_handler/permission_handler.dart';
+import 'package:video_player/video_player.dart';
+import 'package:chewie/chewie.dart';
+import 'package:audio_service/audio_service.dart';
 import '../services/download_service.dart';
 
 class PlayerDetailsScreen extends StatefulWidget {
   final Video video;
   final AudioPlayer audioPlayer;
   final ValueNotifier<double> downloadProgressNotifier;
+  final VoidCallback onNext;
+  final VoidCallback onPrevious;
 
   const PlayerDetailsScreen({
     super.key,
     required this.video,
     required this.audioPlayer,
     required this.downloadProgressNotifier,
+    required this.onNext,
+    required this.onPrevious,
   });
 
   @override
@@ -24,138 +31,190 @@ class PlayerDetailsScreen extends StatefulWidget {
 
 class _PlayerDetailsScreenState extends State<PlayerDetailsScreen> {
   bool _isVideoMode = false;
-  late YoutubePlayerController _ytController;
+  VideoPlayerController? _videoController;
+  ChewieController? _chewieController;
   final DownloadService _downloadService = DownloadService();
+  final YoutubeExplode _yt = YoutubeExplode();
+  bool _isInitializingVideo = false;
 
   @override
   void initState() {
     super.initState();
-    _ytController = YoutubePlayerController.fromVideoId(
-      videoId: widget.video.id.value,
-      autoPlay: true,
-      params: const YoutubePlayerParams(
-        showControls: true,
-        showFullscreenButton: true,
-        mute: false,
-      ),
-    );
+  }
+
+  Future<void> _initNativeVideo(String videoId) async {
+    if (_isInitializingVideo) return;
+    setState(() => _isInitializingVideo = true);
+
+    try {
+      // Get stream manifest
+      var manifest = await _yt.videos.streamsClient.getManifest(videoId);
+      // Get best muxed stream (video + audio) for native player compatibility
+      var streamInfo = manifest.muxed.withHighestBitrate();
+      
+      if (streamInfo != null) {
+        _videoController = VideoPlayerController.networkUrl(streamInfo.url);
+        await _videoController!.initialize();
+
+        _chewieController = ChewieController(
+          videoPlayerController: _videoController!,
+          autoPlay: true,
+          looping: false,
+          aspectRatio: _videoController!.value.aspectRatio,
+          allowFullScreen: true,
+          allowPlaybackSpeedChanging: true,
+          showControls: true,
+          deviceOrientationsAfterFullScreen: [DeviceOrientation.portraitUp],
+          placeholder: Container(color: Colors.black),
+          materialProgressColors: ChewieProgressColors(
+            playedColor: Colors.redAccent,
+            handleColor: Colors.redAccent,
+            backgroundColor: Colors.white24,
+            bufferedColor: Colors.white54,
+          ),
+        );
+      }
+    } catch (e) {
+      debugPrint("Video Init Error: $e");
+    } finally {
+      if (mounted) {
+        setState(() => _isInitializingVideo = false);
+      }
+    }
   }
 
   @override
   void dispose() {
-    _ytController.close();
+    _videoController?.dispose();
+    _chewieController?.dispose();
+    _yt.close();
     super.dispose();
   }
 
-  Future<void> _handleDownload() async {
-    final status = await Permission.storage.request();
-    if (!mounted) return;
-
-    bool isGranted = status.isGranted;
-    if (!isGranted) {
-      isGranted = await Permission.manageExternalStorage.request().isGranted;
-    }
-
-    if (!mounted) return;
-
-    if (isGranted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Starting download to storage...')),
-      );
-      final videoUrl = 'https://www.youtube.com/watch?v=${widget.video.id.value}';
-      final apiUrl = _downloadService.getApiUrl(videoUrl);
-      await _downloadService.downloadToStorage(widget.video.title, apiUrl);
-    } else {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Storage permission denied')),
-      );
-    }
-  }
-
-  void _toggleMode(bool isVideo) {
+  void _toggleMode(bool isVideo, String videoId) {
     setState(() => _isVideoMode = isVideo);
     if (isVideo) {
       widget.audioPlayer.pause();
+      _initNativeVideo(videoId);
     } else {
-      _ytController.pauseVideo();
+      _videoController?.pause();
       widget.audioPlayer.play();
     }
   }
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      backgroundColor: const Color(0xFF0F0F0F),
-      body: SafeArea(
-        child: Column(
-          children: [
-            _buildAppBar(),
-            Expanded(
-              child: Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 24.0),
-                child: Column(
-                  children: [
-                    const SizedBox(height: 10),
-                    _buildModeSwitcher(),
-                    const Spacer(),
-                    _isVideoMode ? _buildVideoPlayer() : _buildMusicPlayer(),
-                    const Spacer(),
-                    _buildVideoInfo(),
-                    const SizedBox(height: 30),
-                    if (!_isVideoMode) _buildControls(),
-                    const Spacer(),
-                  ],
+    return StreamBuilder<SequenceState?>(
+      stream: widget.audioPlayer.sequenceStateStream,
+      builder: (context, snapshot) {
+        final state = snapshot.data;
+        final metadata = state?.currentSource?.tag as MediaItem?;
+        final currentVideoId = metadata?.id ?? widget.video.id.value;
+        final currentTitle = metadata?.title ?? widget.video.title;
+        final currentArtist = metadata?.artist ?? widget.video.author;
+        final currentArtUri = metadata?.artUri?.toString() ?? widget.video.thumbnails.highResUrl;
+
+        return Scaffold(
+          backgroundColor: const Color(0xFF0F0F0F),
+          body: SafeArea(
+            child: Column(
+              children: [
+                _buildAppBar(currentTitle, currentVideoId),
+                Expanded(
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 24.0),
+                    child: Column(
+                      children: [
+                        const SizedBox(height: 10),
+                        _buildModeSwitcher(currentVideoId),
+                        const Spacer(),
+                        _isVideoMode 
+                          ? _buildVideoPlayer(currentVideoId) 
+                          : _buildMusicPlayer(currentVideoId, currentArtUri),
+                        const Spacer(),
+                        _buildVideoInfo(currentTitle, currentArtist),
+                        const SizedBox(height: 30),
+                        if (!_isVideoMode) _buildControls(),
+                        const Spacer(),
+                      ],
+                    ),
+                  ),
                 ),
-              ),
+              ],
             ),
-          ],
-        ),
-      ),
+          ),
+        );
+      },
     );
   }
 
-  Widget _buildAppBar() {
+  Widget _buildAppBar(String title, String videoId) {
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 8.0, vertical: 8),
       child: Row(
         mainAxisAlignment: MainAxisAlignment.spaceBetween,
         children: [
-          IconButton(icon: const Icon(Icons.keyboard_arrow_down_rounded, size: 32, color: Colors.white), onPressed: () => Navigator.pop(context)),
+          IconButton(
+            icon: const Icon(Icons.keyboard_arrow_down_rounded, size: 32, color: Colors.white), 
+            onPressed: () => Navigator.pop(context)
+          ),
           const Text('NOW PLAYING', style: TextStyle(color: Colors.white, fontSize: 13, fontWeight: FontWeight.w900, letterSpacing: 2)),
-          IconButton(icon: const Icon(Icons.download_for_offline_rounded, color: Colors.white), onPressed: _handleDownload),
+          IconButton(
+            icon: const Icon(Icons.download_for_offline_rounded, color: Colors.white),
+            onPressed: () {
+              final videoUrl = 'https://www.youtube.com/watch?v=$videoId';
+              final apiUrl = _downloadService.getApiUrl(videoUrl);
+              // ফোল্ডার সিলেক্ট অপশন সহ ডাউনলোড
+            //  _downloadService.downloadWithPicker(title, apiUrl);
+
+              ScaffoldMessenger.of(context).showSnackBar(
+                const SnackBar(content: Text('Please select a folder to start download')),
+              );
+            }
+          ),
         ],
       ),
     );
   }
 
-  Widget _buildModeSwitcher() {
+  Widget _buildModeSwitcher(String videoId) {
     return Container(
       padding: const EdgeInsets.all(4),
       decoration: BoxDecoration(color: Colors.white.withOpacity(0.05), borderRadius: BorderRadius.circular(30)),
       child: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
-          _modeButton("Music", !_isVideoMode),
-          _modeButton("Video", _isVideoMode),
+          _modeButton("Music", !_isVideoMode, videoId),
+          _modeButton("Video", _isVideoMode, videoId),
         ],
       ),
     );
   }
 
-  Widget _modeButton(String label, bool active) {
+  Widget _modeButton(String label, bool active, String videoId) {
     return GestureDetector(
-      onTap: () => _toggleMode(label == "Video"),
+      onTap: () => _toggleMode(label == "Video", videoId),
       child: Container(
         padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 8),
-        decoration: BoxDecoration(color: active ? Colors.redAccent : Colors.transparent, borderRadius: BorderRadius.circular(25)),
-        child: Text(label, style: TextStyle(color: active ? Colors.white : Colors.grey, fontWeight: FontWeight.bold, fontSize: 13)),
+        decoration: BoxDecoration(
+          color: active ? Colors.redAccent : Colors.transparent, 
+          borderRadius: BorderRadius.circular(25)
+        ),
+        child: Text(
+          label, 
+          style: TextStyle(
+            color: active ? Colors.white : Colors.grey, 
+            fontWeight: FontWeight.bold, 
+            fontSize: 13
+          )
+        ),
       ),
     );
   }
 
-  Widget _buildMusicPlayer() {
+  Widget _buildMusicPlayer(String videoId, String artUri) {
     return Hero(
-      tag: 'thumb_${widget.video.id}',
+      tag: 'thumb_$videoId',
       child: Container(
         decoration: BoxDecoration(
           borderRadius: BorderRadius.circular(20),
@@ -165,27 +224,63 @@ class _PlayerDetailsScreenState extends State<PlayerDetailsScreen> {
           aspectRatio: 1,
           child: ClipRRect(
             borderRadius: BorderRadius.circular(20),
-            child: CachedNetworkImage(imageUrl: widget.video.thumbnails.highResUrl, fit: BoxFit.cover),
+            child: CachedNetworkImage(
+              imageUrl: artUri, 
+              fit: BoxFit.cover,
+              errorWidget: (context, url, error) => Container(
+                color: Colors.white10, 
+                child: const Icon(Icons.music_note, size: 100, color: Colors.white24)
+              ),
+            ),
           ),
         ),
       ),
     );
   }
 
-  Widget _buildVideoPlayer() {
-    return ClipRRect(
-      borderRadius: BorderRadius.circular(16),
-      child: AspectRatio(aspectRatio: 16 / 9, child: YoutubePlayer(controller: _ytController)),
+  Widget _buildVideoPlayer(String videoId) {
+    if (_isInitializingVideo) {
+      return const AspectRatio(
+        aspectRatio: 16 / 9,
+        child: Center(child: CircularProgressIndicator(color: Colors.redAccent)),
+      );
+    }
+
+    if (_chewieController != null && _videoController != null && _videoController!.value.isInitialized) {
+      return ClipRRect(
+        borderRadius: BorderRadius.circular(16),
+        child: AspectRatio(
+          aspectRatio: 16 / 9,
+          child: Chewie(controller: _chewieController!),
+        ),
+      );
+    }
+
+    return AspectRatio(
+      aspectRatio: 16 / 9,
+      child: Container(
+        decoration: BoxDecoration(
+          color: Colors.black,
+          borderRadius: BorderRadius.circular(16),
+        ),
+        child: const Center(child: Icon(Icons.video_library, color: Colors.white24, size: 50)),
+      ),
     );
   }
 
-  Widget _buildVideoInfo() {
+  Widget _buildVideoInfo(String title, String artist) {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.center,
       children: [
-        Text(widget.video.title, textAlign: TextAlign.center, style: const TextStyle(color: Colors.white, fontSize: 20, fontWeight: FontWeight.bold), maxLines: 2, overflow: TextOverflow.ellipsis),
+        Text(
+          title, 
+          textAlign: TextAlign.center, 
+          style: const TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.bold), 
+          maxLines: 2, 
+          overflow: TextOverflow.ellipsis
+        ),
         const SizedBox(height: 8),
-        Text(widget.video.author, style: const TextStyle(color: Colors.redAccent, fontSize: 15, fontWeight: FontWeight.w600)),
+        Text(artist, style: const TextStyle(color: Colors.redAccent, fontSize: 14, fontWeight: FontWeight.w600)),
       ],
     );
   }
@@ -202,11 +297,10 @@ class _PlayerDetailsScreenState extends State<PlayerDetailsScreen> {
               children: [
                 SliderTheme(
                   data: SliderTheme.of(context).copyWith(
-                    trackHeight: 4,
+                    trackHeight: 2,
                     activeTrackColor: Colors.redAccent,
                     inactiveTrackColor: Colors.white.withOpacity(0.1),
                     thumbColor: Colors.white,
-                    overlayColor: Colors.redAccent.withOpacity(0.2),
                     thumbShape: const RoundSliderThumbShape(enabledThumbRadius: 6),
                   ),
                   child: Slider(
@@ -220,8 +314,8 @@ class _PlayerDetailsScreenState extends State<PlayerDetailsScreen> {
                   child: Row(
                     mainAxisAlignment: MainAxisAlignment.spaceBetween,
                     children: [
-                      Text(_formatDuration(position), style: const TextStyle(color: Colors.grey, fontSize: 12)),
-                      Text(_formatDuration(duration), style: const TextStyle(color: Colors.grey, fontSize: 12)),
+                      Text(_formatDuration(position), style: const TextStyle(color: Colors.grey, fontSize: 11)),
+                      Text(_formatDuration(duration), style: const TextStyle(color: Colors.grey, fontSize: 11)),
                     ],
                   ),
                 ),
@@ -229,15 +323,60 @@ class _PlayerDetailsScreenState extends State<PlayerDetailsScreen> {
             );
           },
         ),
-        const SizedBox(height: 20),
+        const SizedBox(height: 10),
         Row(
           mainAxisAlignment: MainAxisAlignment.spaceEvenly,
           children: [
-            IconButton(icon: const Icon(Icons.shuffle_rounded, color: Colors.grey), onPressed: () {}),
-            IconButton(icon: const Icon(Icons.skip_previous_rounded, size: 45, color: Colors.white), onPressed: () {}),
+            // Shuffle Button
+            StreamBuilder<bool>(
+              stream: widget.audioPlayer.shuffleModeEnabledStream,
+              builder: (context, snapshot) {
+                final shuffleEnabled = snapshot.data ?? false;
+                return IconButton(
+                  icon: Icon(
+                    Icons.shuffle_rounded, 
+                    color: shuffleEnabled ? Colors.redAccent : Colors.grey, 
+                    size: 20
+                  ),
+                  onPressed: () => widget.audioPlayer.setShuffleModeEnabled(!shuffleEnabled),
+                );
+              },
+            ),
+            IconButton(
+              icon: const Icon(Icons.skip_previous_rounded, size: 40, color: Colors.white), 
+              onPressed: widget.onPrevious
+            ),
             _buildPlayPauseButton(),
-            IconButton(icon: const Icon(Icons.skip_next_rounded, size: 45, color: Colors.white), onPressed: () {}),
-            IconButton(icon: const Icon(Icons.repeat_rounded, color: Colors.grey), onPressed: () {}),
+            IconButton(
+              icon: const Icon(Icons.skip_next_rounded, size: 40, color: Colors.white), 
+              onPressed: widget.onNext
+            ),
+            // Repeat Button
+            StreamBuilder<LoopMode>(
+              stream: widget.audioPlayer.loopModeStream,
+              builder: (context, snapshot) {
+                final loopMode = snapshot.data ?? LoopMode.off;
+                const icons = [
+                  Icons.repeat_rounded,
+                  Icons.repeat_one_rounded,
+                  Icons.repeat_rounded,
+                ];
+                const colors = [
+                  Colors.grey,
+                  Colors.redAccent,
+                  Colors.redAccent,
+                ];
+                final index = loopMode == LoopMode.off ? 0 : (loopMode == LoopMode.one ? 1 : 2);
+                
+                return IconButton(
+                  icon: Icon(icons[index], color: colors[index], size: 20),
+                  onPressed: () {
+                    final nextMode = LoopMode.values[(LoopMode.values.indexOf(loopMode) + 1) % LoopMode.values.length];
+                    widget.audioPlayer.setLoopMode(nextMode);
+                  },
+                );
+              },
+            ),
           ],
         ),
       ],
@@ -250,15 +389,31 @@ class _PlayerDetailsScreenState extends State<PlayerDetailsScreen> {
       builder: (context, progress, child) {
         return StreamBuilder<PlayerState>(
           stream: widget.audioPlayer.playerStateStream,
+          initialData: widget.audioPlayer.playerState,
           builder: (context, snapshot) {
-            final processingState = snapshot.data?.processingState;
-            final playing = snapshot.data?.playing ?? false;
+            final playerState = snapshot.data;
+            final processingState = playerState?.processingState;
+            final playing = playerState?.playing ?? false;
             
-            if (processingState == ProcessingState.buffering || processingState == ProcessingState.loading) {
-              return const SizedBox(width: 80, height: 80, child: Padding(padding: EdgeInsets.all(20), child: CircularProgressIndicator(color: Colors.redAccent, strokeWidth: 3)));
+            if (processingState == ProcessingState.loading || 
+                processingState == ProcessingState.buffering || 
+                (progress > 0 && progress < 0.05)) {
+              return const SizedBox(
+                width: 80, 
+                height: 80, 
+                child: Padding(
+                  padding: EdgeInsets.all(20), 
+                  child: CircularProgressIndicator(color: Colors.redAccent, strokeWidth: 3)
+                )
+              );
             }
+            
             return IconButton(
-              icon: Icon(playing ? Icons.pause_circle_filled_rounded : Icons.play_circle_filled_rounded, size: 85, color: Colors.white),
+              icon: Icon(
+                playing ? Icons.pause_circle_filled_rounded : Icons.play_circle_filled_rounded, 
+                size: 85, 
+                color: Colors.white
+              ),
               onPressed: () => playing ? widget.audioPlayer.pause() : widget.audioPlayer.play(),
             );
           },

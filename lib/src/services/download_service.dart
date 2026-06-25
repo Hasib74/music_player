@@ -4,6 +4,7 @@ import 'package:path/path.dart' as p;
 import 'package:dio/dio.dart';
 import 'package:pretty_dio_logger/pretty_dio_logger.dart';
 import 'package:logging/logging.dart';
+//import 'package:file_picker/file_picker.dart';
 import 'notification_service.dart';
 
 class DownloadService {
@@ -28,14 +29,12 @@ class DownloadService {
   final Dio _dio = Dio();
   final String _apiBase = 'http://192.168.0.103:8000/api/download';
 
-  // ছোট ফরম্যাট (18) ব্যবহার করলে গান দ্রুত লোড হবে
-  String getApiUrl(String videoUrl, {String formatId = '18'}) {
-    final url = '$_apiBase?url=$videoUrl&format_id=$formatId';
+  String getApiUrl(String videoUrl, {String formatId = '18', bool stream = false}) {
+    final url = '$_apiBase?url=$videoUrl&format_id=$formatId${stream ? '&stream=true' : ''}';
     _logger.info('Generated API URL: $url');
     return url;
   }
 
-  // ক্যাশ ফাইল পাথ পাওয়া
   Future<String> getCacheFilePath(String videoId) async {
     final tempDir = await getTemporaryDirectory();
     final cacheDir = Directory(p.join(tempDir.path, 'audio_cache'));
@@ -45,7 +44,6 @@ class DownloadService {
     return p.join(cacheDir.path, '$videoId.mp4');
   }
 
-  // ক্যাশ ক্লিয়ার করা (পুরানো ফাইল ডিলিট)
   Future<void> clearAllCache() async {
     try {
       final tempDir = await getTemporaryDirectory();
@@ -60,7 +58,43 @@ class DownloadService {
     }
   }
 
-  // পারমানেন্ট ডাউনলোড (গ্যালারিতে বা স্টোরেজে)
+  // ফোল্ডার সিলেক্ট করে ডাউনলোড করা
+/*  Future<void> downloadWithPicker(String title, String apiUrl) async {
+    try {
+      // ১. ইউজারকে ফোল্ডার সিলেক্ট করতে বলা
+      String? selectedDirectory = await FilePicker.getDirectoryPath();
+
+      if (selectedDirectory == null) {
+        _logger.info('User cancelled directory selection');
+        return;
+      }
+
+      // ২. ফাইল পাথ তৈরি করা
+      final fileName = '${title.replaceAll(RegExp(r'[^\w\s]+'), '')}.mp4';
+      final filePath = p.join(selectedDirectory, fileName);
+
+      final NotificationService notificationService = NotificationService();
+
+      _logger.info('Starting download: $title to $filePath');
+
+      // ৩. ব্যাকগ্রাউন্ডে ডাউনলোড শুরু
+      await _dio.download(
+        apiUrl,
+        filePath,
+        onReceiveProgress: (received, total) {
+          if (total != -1) {
+            int progress = (received / total * 100).toInt();
+            notificationService.showDownloadNotification(title, progress);
+          }
+        },
+      );
+
+      _logger.info('Download complete: $filePath');
+    } catch (e) {
+      _logger.severe('Download with picker error: $e');
+    }
+  }*/
+
   Future<void> downloadToStorage(String title, String apiUrl) async {
     try {
       Directory? downloadsDir;
