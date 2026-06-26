@@ -36,11 +36,13 @@ dependencies:
   audio_service:         # ব্যাকগ্রাউন্ড এবং লকস্ক্রিন কন্ট্রোলের জন্য
   cached_network_image:  # থাম্বনেইল দেখানোর জন্য
   shimmer:              # লোডিং এনিমেশনের জন্য
+  logging: ^1.2.0
   path_provider:          # টেম্পোরারি ফাইল সেভ করার জন্য
   path:                # ফাইল পাথ হ্যান্ডেল করার জন্য
   dio: ^5.4.3                   # ডাউনলোডের জন্য উন্নত লাইব্রেরি
   pretty_dio_logger: ^1.3.1     # সুন্দর লগ দেখার জন্য
   permission_handler: ^11.3.1
+  google_generative_ai: ^0.4.5  # Gemini AI এর জন্য
  # file_picker: ^11.0.2         # ফোল্ডার সিলেক্ট করার জন্য
   flutter_local_notifications:  # নোটিফিকেশনের জন্য
   speech_to_text: ^7.4.0       # ভয়েস কমান্ডের জন্য

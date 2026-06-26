@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "973377950457",
+    "project_id": "music-app-d699e",
+    "storage_bucket": "music-app-d699e.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:973377950457:android:7017e7609ad0289a1e0828",
+        "android_client_info": {
+          "package_name": "com.app.beatBox"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyCfMKVmuPrq0BNBqgFleXEA319HWQZfyQY"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

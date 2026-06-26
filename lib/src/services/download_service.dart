@@ -13,12 +13,11 @@ class DownloadService {
   
   factory DownloadService() => _instance;
   DownloadService._internal() {
-    _dio.options.followRedirects = true;
-    _dio.options.maxRedirects = 5;
+    // Dio Interceptor যোগ করা হয়েছে সুন্দর লগ দেখার জন্য
     _dio.interceptors.add(PrettyDioLogger(
       requestHeader: true,
       requestBody: true,
-      responseBody: false, 
+      responseBody: true,
       responseHeader: false,
       error: true,
       compact: true,
@@ -27,7 +26,8 @@ class DownloadService {
   }
 
   final Dio _dio = Dio();
-  final String _apiBase = 'http://192.168.0.103:8000/api/download';
+  //final String _apiBase = 'http://192.168.0.103:8000/api/download';
+  final String _apiBase = 'https://youtube-downloader-production-d5fe.up.railway.app/api/download';
 
   String getApiUrl(String videoUrl, {String formatId = '18', bool stream = false}) {
     final url = '$_apiBase?url=$videoUrl&format_id=$formatId${stream ? '&stream=true' : ''}';
@@ -95,7 +95,7 @@ class DownloadService {
     }
   }*/
 
-  Future<void> downloadToStorage(String title, String apiUrl) async {
+  Future<String?> downloadToStorage(String title, String apiUrl) async {
     try {
       Directory? downloadsDir;
       if (Platform.isAndroid) {
@@ -104,8 +104,12 @@ class DownloadService {
         downloadsDir = await getApplicationDocumentsDirectory();
       }
 
+      if (!await downloadsDir.exists()) {
+        downloadsDir = await getExternalStorageDirectory();
+      }
+
       final fileName = '${title.replaceAll(RegExp(r'[^\w\s]+'), '')}.mp4';
-      final filePath = p.join(downloadsDir.path, fileName);
+      final filePath = p.join(downloadsDir!.path, fileName);
 
       final NotificationService notificationService = NotificationService();
 
@@ -121,8 +125,10 @@ class DownloadService {
       );
       
       _logger.info('Download complete: $filePath');
+      return filePath;
     } catch (e) {
       _logger.severe('Storage download error: $e');
+      return null;
     }
   }
 }

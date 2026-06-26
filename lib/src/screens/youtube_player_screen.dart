@@ -6,6 +6,10 @@ import 'package:youtube_explode_dart/youtube_explode_dart.dart';
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:shimmer/shimmer.dart';
 import 'package:logging/logging.dart';
+import 'package:permission_handler/permission_handler.dart';
+import 'package:path_provider/path_provider.dart';
+import '../services/ai_service.dart';
+import 'local_player_screen.dart';
 import 'player_details_screen.dart';
 import '../services/download_service.dart';
 import '../services/history_service.dart';
@@ -27,11 +31,17 @@ class _YoutubePlayerScreenState extends State<YoutubePlayerScreen> {
   final HistoryService _historyService = HistoryService();
   final ValueNotifier<double> _downloadProgressNotifier = ValueNotifier(0);
 
+  int _bottomNavIndex = 1; // 0: Local, 1: Web (Default)
+  String _localCategory = "Music"; // "Music" or "Video"
+  List<File> _localFiles = [];
+  bool _isScanningLocal = false;
+
   List<Video> _searchResults = [];
   List<Video> _historyVideos = [];
   List<Video> _aiRecommendations = [];
   List<Video> _currentQueue = [];
   int _currentIndex = -1;
+  int _activePlayId = 0;
 
   VideoSearchList? _currentSearchList;
   bool _isSearching = false;
@@ -39,7 +49,14 @@ class _YoutubePlayerScreenState extends State<YoutubePlayerScreen> {
   Video? _currentVideo;
   List<String> _suggestions = [];
 
-  final List<String> _categories = ["Trending", "Relax", "Workout", "Bangla Hits", "Lofi", "Podcast"];
+  final List<String> _categories = [
+    "Trending",
+    "Relax",
+    "Workout",
+    "Bangla Hits",
+    "Lofi",
+    "Podcast"
+  ];
   String _selectedCategory = "Trending";
 
   @override
@@ -48,6 +65,7 @@ class _YoutubePlayerScreenState extends State<YoutubePlayerScreen> {
     _logger.info('Initializing YoutubePlayerScreen');
     _loadInitialData();
     _scrollController.addListener(_scrollListener);
+    _scanLocalFiles();
 
     _audioPlayer.playerStateStream.listen((state) {
       if (state.processingState == ProcessingState.completed) {
@@ -96,7 +114,8 @@ class _YoutubePlayerScreenState extends State<YoutubePlayerScreen> {
   }
 
   void _scrollListener() {
-    if (_scrollController.position.pixels >= _scrollController.position.maxScrollExtent - 200) {
+    if (_scrollController.position.pixels >=
+        _scrollController.position.maxScrollExtent - 200) {
       if (!_isLoadingMore && _currentSearchList != null) {
         _loadMoreVideos();
       }
@@ -126,24 +145,26 @@ class _YoutubePlayerScreenState extends State<YoutubePlayerScreen> {
       return;
     }
     try {
-      final moods = ["Sad music", "Gym workout", "Lofi beats", "Party dance", "Bangla hits", "New songs", "Focus study"];
-      setState(() => _suggestions = moods.where((m) => m.toLowerCase().contains(query.toLowerCase())).toList());
+      final moods = [
+        "Sad music",
+        "Gym workout",
+        "Lofi beats",
+        "Party dance",
+        "Bangla hits",
+        "New songs",
+        "Focus study"
+      ];
+      setState(() => _suggestions = moods
+          .where((m) => m.toLowerCase().contains(query.toLowerCase()))
+          .toList());
     } catch (e) {
       _logger.warning('Suggestion Error: $e');
     }
   }
 
-  Future<void> _searchVideos(String query, {bool isCategory = false, int retryCount = 0}) async {
+  Future<void> _searchVideos(String query,
+      {bool isCategory = false, int retryCount = 0}) async {
     if (query.isEmpty) return;
-
-    String finalQuery = _expandQueryWithAI(query);
-    if (!isCategory) {
-      FocusScope.of(context).unfocus();
-      setState(() {
-        _selectedCategory = "";
-        _suggestions = [];
-      });
-    }
 
     if (retryCount == 0) {
       setState(() {
@@ -152,30 +173,43 @@ class _YoutubePlayerScreenState extends State<YoutubePlayerScreen> {
       });
     }
 
+    // ১. প্রথমে OpenAI থেকে স্মার্ট কিউরি নেওয়া (যদি কী থাকে)
+    final AIService _aiService = AIService();
+    String finalQuery = await _aiService.getSmartSearchQuery(query);
+
+    if (!isCategory) {
+      FocusScope.of(context).unfocus();
+      setState(() {
+        _selectedCategory = "";
+        _suggestions = [];
+      });
+    }
+
     try {
       _currentSearchList = await _yt.search.search(finalQuery);
       if (!mounted) return;
-      
+
       final results = _currentSearchList!.toList();
       setState(() {
         _searchResults = results;
       });
     } catch (e) {
       if (!mounted) return;
-      
+
       _logger.warning('Search error (attempt ${retryCount + 1}): $e');
-      
+
       if (retryCount < 2) {
         await Future.delayed(Duration(seconds: 1 + retryCount));
-        return _searchVideos(query, isCategory: isCategory, retryCount: retryCount + 1);
+        return _searchVideos(query,
+            isCategory: isCategory, retryCount: retryCount + 1);
       }
 
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('YouTube parsing error. Try a simpler search term.'),
-          backgroundColor: Colors.redAccent,
-        ),
-      );
+      // ScaffoldMessenger.of(context).showSnackBar(
+      //   const SnackBar(
+      //     content: Text('YouTube parsing error. Try a simpler search term.'),
+      //     backgroundColor: Colors.redAccent,
+      //   ),
+      // );
     } finally {
       if (mounted && retryCount >= 0) setState(() => _isSearching = false);
     }
@@ -185,12 +219,12 @@ class _YoutubePlayerScreenState extends State<YoutubePlayerScreen> {
     if (duration == null) return "--:--";
     String twoDigits(int n) => n.toString().padLeft(2, "0");
     String twoDigitSeconds = twoDigits(duration.inSeconds.remainder(60));
-    return "${duration.inMinutes}:${twoDigitSeconds}";
+    return "${duration.inMinutes}:$twoDigitSeconds";
   }
 
   String _expandQueryWithAI(String query) {
     final input = query.toLowerCase().trim();
-    
+
     // ক্যাটাগরি অনুযায়ী ক্লিন কিউরি (অতিরিক্ত ট্যাগ রিমুভ করা হয়েছে এরর এড়াতে)
     if (input == "relax") return "Relaxing chill music 2024";
     if (input == "trending") return "Trending music hits";
@@ -200,21 +234,30 @@ class _YoutubePlayerScreenState extends State<YoutubePlayerScreen> {
     if (input == "podcast") return "Music podcast 2024";
 
     // NLP Mood & Intent Detection
-    if (input.contains("sad") || input.contains("low") || input.contains("broken")) {
+    if (input.contains("sad") ||
+        input.contains("low") ||
+        input.contains("broken")) {
       return "soulful sad music songs";
     }
-    if (input.contains("gym") || input.contains("workout") || input.contains("energy")) {
+    if (input.contains("gym") ||
+        input.contains("workout") ||
+        input.contains("energy")) {
       return "high energy gym motivation workout";
     }
-    
+
     return query;
   }
 
   Future<void> _playVideo(Video video, {List<Video>? queue}) async {
     if (queue != null) {
       _currentQueue = queue;
-      _currentIndex = _currentQueue.indexWhere((v) => v.id.value == video.id.value);
+      _currentIndex =
+          _currentQueue.indexWhere((v) => v.id.value == video.id.value);
     }
+
+    // ইউনিক আইডি জেনারেট করা
+    final int playId = DateTime.now().millisecondsSinceEpoch;
+    _activePlayId = playId;
 
     setState(() {
       _currentVideo = video;
@@ -225,12 +268,19 @@ class _YoutubePlayerScreenState extends State<YoutubePlayerScreen> {
     _loadHistory();
 
     try {
+      // ১. প্লেয়ার বন্ধ করা যাতে আগের প্রসেস আটকে যায়
+      await _audioPlayer.stop();
+
+      // ২. নতুন সোর্স লোড করার আগে চেক করা এটিই লেটেস্ট রিকোয়েস্ট কি না
+      if (_activePlayId != playId) return;
+
       await _downloadService.clearAllCache();
       final videoUrl = 'https://www.youtube.com/watch?v=${video.id.value}';
       final apiUrl = _downloadService.getApiUrl(videoUrl, stream: true);
-      final cacheFilePath = await _downloadService.getCacheFilePath(video.id.value);
+      final cacheFilePath =
+          await _downloadService.getCacheFilePath(video.id.value);
 
-      if (!mounted) return;
+      if (!mounted || _activePlayId != playId) return;
 
       final audioSource = LockCachingAudioSource(
         Uri.parse(apiUrl),
@@ -245,32 +295,161 @@ class _YoutubePlayerScreenState extends State<YoutubePlayerScreen> {
       );
 
       audioSource.downloadProgressStream.listen((progress) {
-        _downloadProgressNotifier.value = progress;
-        if (progress > 0.05 && _audioPlayer.processingState == ProcessingState.loading) {
-          _audioPlayer.play();
+        // শুধুমাত্র বর্তমান গানের প্রগ্রেস আপডেট করা
+        if (_activePlayId == playId) {
+          _downloadProgressNotifier.value = progress;
+          if (progress > 0.05 &&
+              _audioPlayer.processingState == ProcessingState.loading) {
+            _audioPlayer.play();
+          }
         }
       });
 
-      await _audioPlayer.setAudioSource(audioSource, preload: true);
-      _audioPlayer.play();
+      if (_activePlayId == playId) {
+        await _audioPlayer.setAudioSource(audioSource, preload: true);
+        _audioPlayer.play();
+      }
     } catch (e) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Failed to stream music')),
-      );
+      if (!mounted || _activePlayId != playId) return;
+      _logger.warning('Playback error: $e');
     }
   }
 
-  void _playNext() {
-    if (_currentQueue.isNotEmpty && _currentIndex < _currentQueue.length - 1) {
+  void _playNext() async {
+    /*if (_currentQueue.isNotEmpty && _currentIndex < _currentQueue.length - 1) {
+      _audioPlayer.stop();
       _playVideo(_currentQueue[_currentIndex + 1]);
+    } else if (_currentVideo != null) {*/
+      // যদি কিউ শেষ হয়ে যায়, তবে Gemini AI ব্যবহার করে নেক্সট গান খুঁজবে
+      _logger.info('Queue finished, asking Gemini for the next song...');
+
+      try {
+        final AIService _aiService = AIService();
+        final suggestionQuery = await _aiService.getNextSongSuggestion(
+            _currentVideo!, _historyVideos);
+
+        final results = await _yt.search.search(suggestionQuery);
+
+        debugPrint("Api base result -> ${results}");
+        if (results.isNotEmpty) {
+          // এমন গান খুঁজবে যা আগে বাজেনি (হিস্টোরিতে নেই)
+          final nextVideo = results.firstWhere(
+            (v) => !_historyVideos.any((hv) => hv.id.value == v.id.value),
+            orElse: () => results.first,
+          );
+
+          _playVideo(nextVideo);
+          _logger.info('Playing Gemini suggested song: ${nextVideo.title}');
+        } else {
+          _playNextFromAiSuggestions();
+        }
+      } catch (e) {
+        _logger.warning('Gemini Next Video error: $e');
+        _playNextFromAiSuggestions();
+      }
+   // }
+  }
+
+  void _playNextFromAiSuggestions() {
+    if (_aiRecommendations.isNotEmpty) {
+      final nextAiVideo = _aiRecommendations.firstWhere(
+        (v) => !_historyVideos.any((hv) => hv.id.value == v.id.value),
+        orElse: () => _aiRecommendations.first,
+      );
+      _playVideo(nextAiVideo);
+      _logger.info('Fallback to AI suggestions: ${nextAiVideo.title}');
     }
   }
 
   void _playPrevious() {
     if (_currentQueue.isNotEmpty && _currentIndex > 0) {
+      _audioPlayer.stop(); // ইউজারকে ইনস্ট্যান্ট ফিডব্যাক দেওয়া
       _playVideo(_currentQueue[_currentIndex - 1]);
     }
+  }
+
+  Future<void> _scanLocalFiles() async {
+    setState(() => _isScanningLocal = true);
+    try {
+      if (await Permission.storage.request().isGranted ||
+          await Permission.manageExternalStorage.request().isGranted ||
+          (Platform.isAndroid && await Permission.audio.request().isGranted)) {
+        List<File> files = [];
+
+        // Android 11+ এ নির্দিষ্ট ডিরেক্টরি স্ক্যান করা আরও নিরাপদ
+        final directoriesToScan = [
+          Directory('/storage/emulated/0/Download'),
+          Directory('/storage/emulated/0/Music'),
+        ];
+
+        for (var dir in directoriesToScan) {
+          if (await dir.exists()) {
+            try {
+              final entities =
+                  await dir.list(recursive: true, followLinks: false).toList();
+              for (var entity in entities) {
+                if (entity is File) {
+                  final path = entity.path.toLowerCase();
+                  if (path.endsWith('.mp3') ||
+                      path.endsWith('.mp4') ||
+                      path.endsWith('.m4a')) {
+                    files.add(entity);
+                  }
+                }
+              }
+            } catch (e) {
+              _logger.warning('Error scanning directory ${dir.path}: $e');
+            }
+          }
+        }
+
+        setState(() {
+          _localFiles = files;
+        });
+      } else {
+        _logger.warning('Storage permissions not granted');
+      }
+    } catch (e) {
+      _logger.warning('Local scan error: $e');
+    } finally {
+      if (mounted) setState(() => _isScanningLocal = false);
+    }
+  }
+
+  Future<void> _playLocalFile(File file) async {
+    try {
+      await _audioPlayer.stop();
+
+      final index = _localFiles.indexWhere((f) => f.path == file.path);
+      _showLocalPlayer(index >= 0 ? index : 0);
+    } catch (e) {
+      _logger.severe('Local play error: $e');
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Error: $e')),
+      );
+    }
+  }
+
+  void _showLocalPlayer(int index) {
+    Navigator.push(
+      context,
+      PageRouteBuilder(
+        pageBuilder: (context, animation, secondaryAnimation) =>
+            LocalPlayerScreen(
+          playlist: _localFiles.whereType<File>().toList(),
+          initialIndex: index,
+          audioPlayer: _audioPlayer,
+        ),
+        transitionsBuilder: (context, animation, secondaryAnimation, child) {
+          return SlideTransition(
+            position: animation.drive(
+                Tween(begin: const Offset(0, 1), end: Offset.zero)
+                    .chain(CurveTween(curve: Curves.easeOutExpo))),
+            child: child,
+          );
+        },
+      ),
+    );
   }
 
   @override
@@ -281,38 +460,165 @@ class _YoutubePlayerScreenState extends State<YoutubePlayerScreen> {
         child: Column(
           children: [
             _buildAppBar(),
-            _buildSearchBar(),
-            _buildCategoryChips(),
+            if (_bottomNavIndex == 1) ...[
+              _buildSearchBar(),
+              _buildCategoryChips(),
+            ],
             Expanded(
-              child: _isSearching
-                  ? _buildShimmerLoading()
-                  : RefreshIndicator(
-                      onRefresh: _loadInitialData,
-                      color: Colors.redAccent,
-                      child: SingleChildScrollView(
-                        controller: _scrollController,
-                        physics: const BouncingScrollPhysics(),
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            if (_searchController.text.isEmpty) ...[
-                              _buildHistorySection(),
-                              _buildAIRecommendedSection(),
-                              _buildSectionHeader(
-                                "Trending Now",
-                                onTap: () => _searchVideos("Trending Music", isCategory: true),
-                              ),
-                            ],
-                            _buildResultList(),
-                          ],
-                        ),
-                      ),
-                    ),
+              child: _bottomNavIndex == 1 ? _buildWebView() : _buildLocalView(),
             ),
           ],
         ),
       ),
+      bottomNavigationBar: BottomNavigationBar(
+        currentIndex: _bottomNavIndex,
+        onTap: (index) {
+          setState(() {
+            _bottomNavIndex = index;
+          });
+          if (index == 0 && _localFiles.isEmpty) {
+            _scanLocalFiles();
+          }
+        },
+        backgroundColor: const Color(0xFF1A1A1A),
+        selectedItemColor: Colors.redAccent,
+        unselectedItemColor: Colors.grey,
+        items: const [
+          BottomNavigationBarItem(
+              icon: Icon(Icons.folder_open_rounded), label: 'Local'),
+          BottomNavigationBarItem(
+              icon: Icon(Icons.language_rounded), label: 'Web'),
+        ],
+      ),
       bottomSheet: _currentVideo != null ? _buildMiniPlayer() : null,
+    );
+  }
+
+  Widget _buildWebView() {
+    return _isSearching
+        ? _buildShimmerLoading()
+        : RefreshIndicator(
+            onRefresh: _loadInitialData,
+            color: Colors.redAccent,
+            child: SingleChildScrollView(
+              controller: _scrollController,
+              physics: const BouncingScrollPhysics(),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  if (_searchController.text.isEmpty) ...[
+                    _buildHistorySection(),
+                    _buildAIRecommendedSection(),
+                    _buildSectionHeader(
+                      "Trending Now",
+                      onTap: () =>
+                          _searchVideos("Trending Music", isCategory: true),
+                    ),
+                  ],
+                  _buildResultList(),
+                ],
+              ),
+            ),
+          );
+  }
+
+  Widget _buildLocalView() {
+    if (_isScanningLocal) {
+      return const Center(
+          child: CircularProgressIndicator(color: Colors.redAccent));
+    }
+
+    final filteredFiles = _localFiles.where((file) {
+      if (_localCategory == "Video") return file.path.endsWith('.mp4');
+      return file.path.endsWith('.mp3') || file.path.endsWith('.m4a');
+    }).toList();
+
+    return Column(
+      children: [
+        _buildLocalSubCategorySwitcher(),
+        if (filteredFiles.isEmpty)
+          Expanded(
+            child: Center(
+              child: Column(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  const Icon(Icons.music_off_rounded,
+                      size: 60, color: Colors.grey),
+                  const SizedBox(height: 16),
+                  Text('No local $_localCategory files found',
+                      style: const TextStyle(color: Colors.grey)),
+                  const SizedBox(height: 16),
+                  ElevatedButton(
+                    onPressed: _scanLocalFiles,
+                    style: ElevatedButton.styleFrom(
+                        backgroundColor: Colors.redAccent),
+                    child: const Text('Rescan Storage'),
+                  )
+                ],
+              ),
+            ),
+          )
+        else
+          Expanded(
+            child: ListView.builder(
+              itemCount: filteredFiles.length,
+              padding: const EdgeInsets.only(bottom: 100),
+              itemBuilder: (context, index) {
+                final file = filteredFiles[index];
+                final isMp4 = file.path.endsWith('.mp4');
+                return ListTile(
+                  leading: Icon(
+                    isMp4
+                        ? Icons.video_library_rounded
+                        : Icons.audiotrack_rounded,
+                    color: Colors.redAccent,
+                  ),
+                  title: Text(
+                    file.path.split('/').last,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(color: Colors.white, fontSize: 14),
+                  ),
+                  subtitle: Text(
+                    'Local File • ${(file.lengthSync() / (1024 * 1024)).toStringAsFixed(2)} MB',
+                    style: const TextStyle(color: Colors.grey, fontSize: 11),
+                  ),
+                  onTap: () => _playLocalFile(file),
+                );
+              },
+            ),
+          ),
+      ],
+    );
+  }
+
+  Widget _buildLocalSubCategorySwitcher() {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 8.0, horizontal: 16),
+      child: Row(
+        children: [
+          _localSubChip("Music", Icons.music_note_rounded),
+          const SizedBox(width: 8),
+          _localSubChip("Video", Icons.video_library_rounded),
+        ],
+      ),
+    );
+  }
+
+  Widget _localSubChip(String label, IconData icon) {
+    final isSelected = _localCategory == label;
+    return ChoiceChip(
+      label: Text(label),
+      avatar:
+          Icon(icon, size: 16, color: isSelected ? Colors.white : Colors.grey),
+      selected: isSelected,
+      onSelected: (val) => setState(() => _localCategory = label),
+      backgroundColor: Colors.white.withOpacity(0.05),
+      selectedColor: Colors.redAccent,
+      labelStyle: TextStyle(
+          color: isSelected ? Colors.white : Colors.grey, fontSize: 12),
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+      showCheckmark: false,
     );
   }
 
@@ -326,7 +632,12 @@ class _YoutubePlayerScreenState extends State<YoutubePlayerScreen> {
             children: [
               const Icon(Icons.auto_awesome, color: Colors.redAccent, size: 24),
               const SizedBox(width: 8),
-              Text('MusiCore', style: TextStyle(fontWeight: FontWeight.w900, color: Colors.white, fontSize: 22, letterSpacing: -0.5)),
+              Text('BeatBox',
+                  style: TextStyle(
+                      fontWeight: FontWeight.w900,
+                      color: Colors.white,
+                      fontSize: 22,
+                      letterSpacing: -0.5)),
             ],
           ),
           IconButton(
@@ -358,17 +669,21 @@ class _YoutubePlayerScreenState extends State<YoutubePlayerScreen> {
               style: const TextStyle(color: Colors.white, fontSize: 14),
               decoration: InputDecoration(
                 hintText: 'Try: "I am feeling low" or "Gym hits"',
-                hintStyle: TextStyle(color: Colors.white.withOpacity(0.3), fontSize: 13),
-                prefixIcon: const Icon(Icons.auto_awesome, color: Colors.redAccent, size: 20),
-                suffixIcon: _searchController.text.isNotEmpty 
-                  ? IconButton(
-                      icon: const Icon(Icons.close_rounded, color: Colors.white54, size: 18),
-                      onPressed: () {
-                        _searchController.clear();
-                        setState(() {});
-                      },
-                    )
-                  : const Icon(Icons.search_rounded, color: Colors.white30, size: 20),
+                hintStyle: TextStyle(
+                    color: Colors.white.withOpacity(0.3), fontSize: 13),
+                prefixIcon: const Icon(Icons.auto_awesome,
+                    color: Colors.redAccent, size: 20),
+                suffixIcon: _searchController.text.isNotEmpty
+                    ? IconButton(
+                        icon: const Icon(Icons.close_rounded,
+                            color: Colors.white54, size: 18),
+                        onPressed: () {
+                          _searchController.clear();
+                          setState(() {});
+                        },
+                      )
+                    : const Icon(Icons.search_rounded,
+                        color: Colors.white30, size: 20),
                 border: InputBorder.none,
                 contentPadding: const EdgeInsets.symmetric(vertical: 14),
               ),
@@ -382,12 +697,16 @@ class _YoutubePlayerScreenState extends State<YoutubePlayerScreen> {
                   const SizedBox(
                     width: 10,
                     height: 10,
-                    child: CircularProgressIndicator(strokeWidth: 2, color: Colors.redAccent),
+                    child: CircularProgressIndicator(
+                        strokeWidth: 2, color: Colors.redAccent),
                   ),
                   const SizedBox(width: 8),
                   Text(
                     'AI is curating your playlist...',
-                    style: TextStyle(color: Colors.redAccent.withOpacity(0.7), fontSize: 10, fontWeight: FontWeight.bold),
+                    style: TextStyle(
+                        color: Colors.redAccent.withOpacity(0.7),
+                        fontSize: 10,
+                        fontWeight: FontWeight.bold),
                   ),
                 ],
               ),
@@ -424,7 +743,12 @@ class _YoutubePlayerScreenState extends State<YoutubePlayerScreen> {
                 fontSize: 12,
                 fontWeight: isSelected ? FontWeight.bold : FontWeight.normal,
               ),
-              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20), side: BorderSide(color: isSelected ? Colors.redAccent.withOpacity(0.5) : Colors.transparent)),
+              shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(20),
+                  side: BorderSide(
+                      color: isSelected
+                          ? Colors.redAccent.withOpacity(0.5)
+                          : Colors.transparent)),
               showCheckmark: false,
             ),
           );
@@ -439,14 +763,22 @@ class _YoutubePlayerScreenState extends State<YoutubePlayerScreen> {
       child: Row(
         mainAxisAlignment: MainAxisAlignment.spaceBetween,
         children: [
-          Text(title, style: const TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.w900)),
+          Text(title,
+              style: const TextStyle(
+                  color: Colors.white,
+                  fontSize: 18,
+                  fontWeight: FontWeight.w900)),
           if (onTap != null)
             InkWell(
               onTap: onTap,
               borderRadius: BorderRadius.circular(4),
               child: Padding(
                 padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-                child: Text('See all', style: TextStyle(color: Colors.redAccent, fontSize: 12, fontWeight: FontWeight.bold)),
+                child: Text('See all',
+                    style: TextStyle(
+                        color: Colors.redAccent,
+                        fontSize: 12,
+                        fontWeight: FontWeight.bold)),
               ),
             ),
         ],
@@ -461,7 +793,8 @@ class _YoutubePlayerScreenState extends State<YoutubePlayerScreen> {
       children: [
         _buildSectionHeader(
           "Recently Played",
-          onTap: () => _showFullListBottomSheet("Playback History", _historyVideos),
+          onTap: () =>
+              _showFullListBottomSheet("Playback History", _historyVideos),
         ),
         SizedBox(
           height: 155,
@@ -494,8 +827,17 @@ class _YoutubePlayerScreenState extends State<YoutubePlayerScreen> {
                         ),
                       ),
                       const SizedBox(height: 8),
-                      Text(video.title, maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(color: Colors.white, fontSize: 12, fontWeight: FontWeight.w600)),
-                      Text(video.author, maxLines: 1, style: const TextStyle(color: Colors.grey, fontSize: 10)),
+                      Text(video.title,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(
+                              color: Colors.white,
+                              fontSize: 12,
+                              fontWeight: FontWeight.w600)),
+                      Text(video.author,
+                          maxLines: 1,
+                          style: const TextStyle(
+                              color: Colors.grey, fontSize: 10)),
                     ],
                   ),
                 ),
@@ -548,11 +890,19 @@ class _YoutubePlayerScreenState extends State<YoutubePlayerScreen> {
                               fit: BoxFit.cover,
                             ),
                           ),
-                          PositionResult(duration: _formatDuration(video.duration)),
+                          PositionResult(
+                              duration: _formatDuration(video.duration)),
                         ],
                       ),
                       const SizedBox(height: 10),
-                      Text(video.title, maxLines: 2, overflow: TextOverflow.ellipsis, style: const TextStyle(color: Colors.white, fontSize: 13, fontWeight: FontWeight.bold, height: 1.2)),
+                      Text(video.title,
+                          maxLines: 2,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(
+                              color: Colors.white,
+                              fontSize: 13,
+                              fontWeight: FontWeight.bold,
+                              height: 1.2)),
                     ],
                   ),
                 ),
@@ -574,12 +924,15 @@ class _YoutubePlayerScreenState extends State<YoutubePlayerScreen> {
         if (index == _searchResults.length) {
           return const Padding(
             padding: EdgeInsets.symmetric(vertical: 20),
-            child: Center(child: CircularProgressIndicator(color: Colors.redAccent, strokeWidth: 2)),
+            child: Center(
+                child: CircularProgressIndicator(
+                    color: Colors.redAccent, strokeWidth: 2)),
           );
         }
         final video = _searchResults[index];
         return ListTile(
-          contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+          contentPadding:
+              const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
           leading: Hero(
             tag: 'thumb_${video.id}',
             child: ClipRRect(
@@ -592,15 +945,112 @@ class _YoutubePlayerScreenState extends State<YoutubePlayerScreen> {
               ),
             ),
           ),
-          title: Text(video.title, maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w600, fontSize: 14)),
-          subtitle: Text("${video.author} • ${_formatDuration(video.duration)}", style: const TextStyle(color: Colors.grey, fontSize: 11)),
-          trailing: IconButton(icon: const Icon(Icons.more_vert_rounded, color: Colors.white24, size: 20), onPressed: () {}),
+          title: Text(video.title,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(
+                  color: Colors.white,
+                  fontWeight: FontWeight.w600,
+                  fontSize: 14)),
+          subtitle: Text("${video.author} • ${_formatDuration(video.duration)}",
+              style: const TextStyle(color: Colors.grey, fontSize: 11)),
+          trailing: PopupMenuButton<String>(
+            icon: const Icon(Icons.more_vert_rounded,
+                color: Colors.white24, size: 20),
+            color: const Color(0xFF1A1A1A),
+            shape:
+                RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+            onSelected: (value) async {
+              if (value == 'download') {
+                _confirmDownload(video);
+              } else if (value == 'share') {
+                // এখানে শেয়ার লজিক যোগ করা যাবে
+              }
+            },
+            itemBuilder: (context) => [
+              _buildPopupItem(
+                  'play_next', Icons.playlist_add_check_rounded, 'Play Next'),
+              _buildPopupItem('download', Icons.download_rounded, 'Download'),
+              _buildPopupItem('share', Icons.share_rounded, 'Share'),
+            ],
+          ),
           onTap: () {
             _playVideo(video, queue: _searchResults);
             _showPlayerDetails(video);
           },
         );
       },
+    );
+  }
+
+  void _confirmDownload(Video video) {
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        backgroundColor: const Color(0xFF1A1A1A),
+        title:
+            const Text("Download Song?", style: TextStyle(color: Colors.white)),
+        content: Text(
+          "Do you want to download '${video.title}' to your storage?",
+          style: const TextStyle(color: Colors.white70),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text("Cancel", style: TextStyle(color: Colors.grey)),
+          ),
+          TextButton(
+            onPressed: () {
+              Navigator.pop(context);
+              _startDownload(video);
+            },
+            child: const Text("Download",
+                style: TextStyle(color: Colors.redAccent)),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _startDownload(Video video) async {
+    final videoUrl = 'https://www.youtube.com/watch?v=${video.id.value}';
+
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text('Starting download...')),
+    );
+
+    final String? filePath = await _downloadService.downloadToStorage(
+      video.title,
+      _downloadService.getApiUrl(videoUrl),
+    );
+
+    if (filePath != null && mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: const Text('Download Complete!'),
+          backgroundColor: Colors.green,
+          action: SnackBarAction(
+            label: 'OPEN',
+            textColor: Colors.white,
+            onPressed: () => _playLocalFile(File(filePath)),
+          ),
+        ),
+      );
+    }
+  }
+
+  PopupMenuItem<String> _buildPopupItem(
+      String value, IconData icon, String title) {
+    return PopupMenuItem(
+      value: value,
+      child: Row(
+        children: [
+          Icon(icon, color: Colors.white70, size: 20),
+          const SizedBox(width: 12),
+          Text(title,
+              style: const TextStyle(color: Colors.white, fontSize: 14)),
+        ],
+      ),
     );
   }
 
@@ -635,13 +1085,20 @@ class _YoutubePlayerScreenState extends State<YoutubePlayerScreen> {
                 children: [
                   Text(
                     title,
-                    style: const TextStyle(color: Colors.white, fontSize: 20, fontWeight: FontWeight.bold),
+                    style: const TextStyle(
+                        color: Colors.white,
+                        fontSize: 20,
+                        fontWeight: FontWeight.bold),
                   ),
                   if (title == "Playback History")
                     TextButton.icon(
                       onPressed: () => _confirmClearHistory(),
-                      icon: const Icon(Icons.delete_sweep_rounded, color: Colors.redAccent, size: 20),
-                      label: const Text("Clear All", style: TextStyle(color: Colors.redAccent, fontWeight: FontWeight.bold)),
+                      icon: const Icon(Icons.delete_sweep_rounded,
+                          color: Colors.redAccent, size: 20),
+                      label: const Text("Clear All",
+                          style: TextStyle(
+                              color: Colors.redAccent,
+                              fontWeight: FontWeight.bold)),
                     ),
                 ],
               ),
@@ -667,7 +1124,10 @@ class _YoutubePlayerScreenState extends State<YoutubePlayerScreen> {
                       video.title,
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(color: Colors.white, fontSize: 14, fontWeight: FontWeight.w600),
+                      style: const TextStyle(
+                          color: Colors.white,
+                          fontSize: 14,
+                          fontWeight: FontWeight.w600),
                     ),
                     subtitle: Text(
                       video.author,
@@ -693,8 +1153,10 @@ class _YoutubePlayerScreenState extends State<YoutubePlayerScreen> {
       context: context,
       builder: (context) => AlertDialog(
         backgroundColor: const Color(0xFF1A1A1A),
-        title: const Text("Clear History?", style: TextStyle(color: Colors.white)),
-        content: const Text("Do you want to delete your playback history?", style: TextStyle(color: Colors.white70)),
+        title:
+            const Text("Clear History?", style: TextStyle(color: Colors.white)),
+        content: const Text("Do you want to delete your playback history?",
+            style: TextStyle(color: Colors.white70)),
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(context),
@@ -711,7 +1173,8 @@ class _YoutubePlayerScreenState extends State<YoutubePlayerScreen> {
                 Navigator.pop(context); // Close bottom sheet
               }
             },
-            child: const Text("Clear", style: TextStyle(color: Colors.redAccent)),
+            child:
+                const Text("Clear", style: TextStyle(color: Colors.redAccent)),
           ),
         ],
       ),
@@ -722,7 +1185,8 @@ class _YoutubePlayerScreenState extends State<YoutubePlayerScreen> {
     Navigator.push(
       context,
       PageRouteBuilder(
-        pageBuilder: (context, animation, secondaryAnimation) => PlayerDetailsScreen(
+        pageBuilder: (context, animation, secondaryAnimation) =>
+            PlayerDetailsScreen(
           video: video,
           audioPlayer: _audioPlayer,
           downloadProgressNotifier: _downloadProgressNotifier,
@@ -731,7 +1195,9 @@ class _YoutubePlayerScreenState extends State<YoutubePlayerScreen> {
         ),
         transitionsBuilder: (context, animation, secondaryAnimation, child) {
           return SlideTransition(
-            position: animation.drive(Tween(begin: const Offset(0, 1), end: Offset.zero).chain(CurveTween(curve: Curves.easeOutExpo))),
+            position: animation.drive(
+                Tween(begin: const Offset(0, 1), end: Offset.zero)
+                    .chain(CurveTween(curve: Curves.easeOutExpo))),
             child: child,
           );
         },
@@ -740,12 +1206,13 @@ class _YoutubePlayerScreenState extends State<YoutubePlayerScreen> {
   }
 
   Widget _buildHomePlaceholder() {
-    return const SizedBox.shrink(); 
+    return const SizedBox.shrink();
   }
 
   Widget _buildMiniPlayer() {
     return Container(
-      color: Colors.transparent, // Background color for the area behind the floating player
+      color: Colors.transparent,
+      // Background color for the area behind the floating player
       child: SafeArea(
         top: false,
         child: Container(
@@ -818,7 +1285,8 @@ class _YoutubePlayerScreenState extends State<YoutubePlayerScreen> {
     return Row(
       children: [
         IconButton(
-          icon: const Icon(Icons.skip_previous_rounded, color: Colors.white, size: 28),
+          icon: const Icon(Icons.skip_previous_rounded,
+              color: Colors.white, size: 28),
           onPressed: _playPrevious,
           constraints: const BoxConstraints(),
           padding: EdgeInsets.zero,
@@ -834,26 +1302,25 @@ class _YoutubePlayerScreenState extends State<YoutubePlayerScreen> {
                 final playerState = snapshot.data;
                 final processingState = playerState?.processingState;
                 final playing = playerState?.playing ?? false;
-                
-                if (processingState == ProcessingState.loading || 
-                    processingState == ProcessingState.buffering || 
+
+                if (processingState == ProcessingState.loading ||
+                    processingState == ProcessingState.buffering ||
                     (progress > 0 && progress < 0.1)) {
                   return const SizedBox(
-                    width: 32, 
-                    height: 32, 
-                    child: Padding(
-                      padding: EdgeInsets.all(4), 
-                      child: CircularProgressIndicator(strokeWidth: 2, color: Colors.redAccent)
-                    )
-                  );
+                      width: 32,
+                      height: 32,
+                      child: Padding(
+                          padding: EdgeInsets.all(4),
+                          child: CircularProgressIndicator(
+                              strokeWidth: 2, color: Colors.redAccent)));
                 }
                 return IconButton(
                   icon: Icon(
-                    playing ? Icons.pause_rounded : Icons.play_arrow_rounded, 
-                    color: Colors.white, 
-                    size: 32
-                  ),
-                  onPressed: () => playing ? _audioPlayer.pause() : _audioPlayer.play(),
+                      playing ? Icons.pause_rounded : Icons.play_arrow_rounded,
+                      color: Colors.white,
+                      size: 32),
+                  onPressed: () =>
+                      playing ? _audioPlayer.pause() : _audioPlayer.play(),
                   constraints: const BoxConstraints(),
                   padding: EdgeInsets.zero,
                 );
@@ -863,14 +1330,16 @@ class _YoutubePlayerScreenState extends State<YoutubePlayerScreen> {
         ),
         const SizedBox(width: 4),
         IconButton(
-          icon: const Icon(Icons.skip_next_rounded, color: Colors.white, size: 28),
+          icon: const Icon(Icons.skip_next_rounded,
+              color: Colors.white, size: 28),
           onPressed: _playNext,
           constraints: const BoxConstraints(),
           padding: EdgeInsets.zero,
         ),
         const SizedBox(width: 4),
         IconButton(
-          icon: const Icon(Icons.close_rounded, color: Colors.white54, size: 20),
+          icon:
+              const Icon(Icons.close_rounded, color: Colors.white54, size: 20),
           onPressed: () {
             _audioPlayer.stop();
             setState(() {
@@ -891,9 +1360,19 @@ class _YoutubePlayerScreenState extends State<YoutubePlayerScreen> {
         baseColor: Colors.white.withOpacity(0.05),
         highlightColor: Colors.white.withOpacity(0.1),
         child: ListTile(
-          leading: Container(width: 50, height: 50, decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(8))),
-          title: Container(height: 15, color: Colors.white, margin: const EdgeInsets.only(right: 50)),
-          subtitle: Container(height: 10, color: Colors.white, margin: const EdgeInsets.only(right: 150, top: 5)),
+          leading: Container(
+              width: 50,
+              height: 50,
+              decoration: BoxDecoration(
+                  color: Colors.white, borderRadius: BorderRadius.circular(8))),
+          title: Container(
+              height: 15,
+              color: Colors.white,
+              margin: const EdgeInsets.only(right: 50)),
+          subtitle: Container(
+              height: 10,
+              color: Colors.white,
+              margin: const EdgeInsets.only(right: 150, top: 5)),
         ),
       ),
     );
@@ -902,6 +1381,7 @@ class _YoutubePlayerScreenState extends State<YoutubePlayerScreen> {
 
 class PositionResult extends StatelessWidget {
   final String duration;
+
   const PositionResult({super.key, required this.duration});
 
   @override
@@ -911,8 +1391,14 @@ class PositionResult extends StatelessWidget {
       right: 8,
       child: Container(
         padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-        decoration: BoxDecoration(color: Colors.black.withOpacity(0.8), borderRadius: BorderRadius.circular(4)),
-        child: Text(duration, style: const TextStyle(color: Colors.white, fontSize: 10, fontWeight: FontWeight.bold)),
+        decoration: BoxDecoration(
+            color: Colors.black.withOpacity(0.8),
+            borderRadius: BorderRadius.circular(4)),
+        child: Text(duration,
+            style: const TextStyle(
+                color: Colors.white,
+                fontSize: 10,
+                fontWeight: FontWeight.bold)),
       ),
     );
   }
