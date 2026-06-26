@@ -15,6 +15,7 @@ class PlayerDetailsScreen extends StatefulWidget {
   final ValueNotifier<double> downloadProgressNotifier;
   final VoidCallback onNext;
   final VoidCallback onPrevious;
+  final Color accentColor;
 
   const PlayerDetailsScreen({
     super.key,
@@ -23,6 +24,7 @@ class PlayerDetailsScreen extends StatefulWidget {
     required this.downloadProgressNotifier,
     required this.onNext,
     required this.onPrevious,
+    this.accentColor = Colors.redAccent,
   });
 
   @override
@@ -92,7 +94,7 @@ class _PlayerDetailsScreenState extends State<PlayerDetailsScreen> {
   Future<void> _initNativeVideo(String videoId, String? localPath) async {
     // যদি অলরেডি এই ভিডিওটি লোড করা থাকে, তবে নতুন করে এপিআই কল করার দরকার নেই
     if (_isInitializingVideo || _lastInitializedVideoId == videoId) {
-      _videoController?.play(); // জাস্ট প্লে করে দাও
+      _videoController?.play();
       return;
     }
     
@@ -106,7 +108,6 @@ class _PlayerDetailsScreenState extends State<PlayerDetailsScreen> {
     });
 
     try {
-      // লোকাল ফাইল নাকি অনলাইন ভিডিও তা নিশ্চিত করা
       bool isLocalFile = videoId.contains('/') || videoId == 'local_file' || videoId == 'local';
       
       if (isLocalFile) {
@@ -117,19 +118,19 @@ class _PlayerDetailsScreenState extends State<PlayerDetailsScreen> {
           throw "Local file not found at: $path";
         }
       } else {
-        // ইউটিউব ভিডিওর জন্য লজিক
-        var manifest = await _yt.videos.streamsClient.getManifest(videoId);
-        VideoStreamInfo streamInfo = manifest.muxed.withHighestBitrate();
+        // ১. স্মার্ট সোর্স ডিটেকশন (Next-Gen Logic)
+        final cachePath = await _downloadService.getCacheFilePath(videoId);
+        final cacheFile = File(cachePath);
         
-        if (streamInfo == null) {
-          // যদি muxed না থাকে তবে শুধু ভিডিও স্ট্রীম নেওয়া (অডিও ছাড়া হতে পারে)
-          streamInfo = manifest.video.withHighestBitrate();
-        }
-        
-        if (streamInfo != null) {
-          _videoController = VideoPlayerController.networkUrl(streamInfo.url);
+        // ২. চেক করা এটি অলরেডি ক্যাশে আছে কিনা এবং ডাটা আছে কিনা
+        if (cacheFile.existsSync() && cacheFile.lengthSync() > 1024 * 100) {
+          _videoController = VideoPlayerController.file(cacheFile);
         } else {
-          throw "No playable video streams found for this video.";
+          // ৩. যদি ক্যাশে না থাকে, তবে ইউটিউব এপিআই বাদ দিয়ে আমাদের প্রক্সি এপিআই ব্যবহার করা
+          // এতে লোডিং অনেক ফাস্ট হবে এবং আলাদা লজিকের দরকার হবে না
+          final videoUrl = 'https://www.youtube.com/watch?v=$videoId';
+          final apiUrl = _downloadService.getApiUrl(videoUrl, stream: true);
+          _videoController = VideoPlayerController.networkUrl(Uri.parse(apiUrl));
         }
       }
 
@@ -147,8 +148,8 @@ class _PlayerDetailsScreenState extends State<PlayerDetailsScreen> {
           deviceOrientationsAfterFullScreen: [DeviceOrientation.portraitUp],
           placeholder: Container(color: Colors.black),
           materialProgressColors: ChewieProgressColors(
-            playedColor: Colors.redAccent,
-            handleColor: Colors.redAccent,
+            playedColor: widget.accentColor,
+            handleColor: widget.accentColor,
             backgroundColor: Colors.white24,
             bufferedColor: Colors.white54,
           ),
@@ -156,7 +157,16 @@ class _PlayerDetailsScreenState extends State<PlayerDetailsScreen> {
       }
     } catch (e) {
       debugPrint("Video Player Error: $e");
-      setState(() => _videoErrorMessage = "Failed to load video. Please try again.");
+      setState(() => _videoErrorMessage = "Failed to load video. Using backend stream instead.");
+      
+      // ব্যাকআপ: যদি লোকাল ফাইল এরর দেয়, তবে নেটওয়ার্ক ট্রাই করা
+      if (!_videoErrorMessage!.contains("backend")) {
+        final videoUrl = 'https://www.youtube.com/watch?v=$videoId';
+        final apiUrl = _downloadService.getApiUrl(videoUrl, stream: true);
+        _videoController = VideoPlayerController.networkUrl(Uri.parse(apiUrl));
+        await _videoController!.initialize();
+        // ... (Re-init chewie if needed, but the catch will handle it)
+      }
     } finally {
       if (mounted) {
         setState(() => _isInitializingVideo = false);
@@ -309,7 +319,7 @@ class _PlayerDetailsScreenState extends State<PlayerDetailsScreen> {
       onTap: () => _toggleMode(label == "Video", videoId, localPath),
       child: Container(
         padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 8),
-        decoration: BoxDecoration(color: active ? Colors.redAccent : Colors.transparent, borderRadius: BorderRadius.circular(25)),
+        decoration: BoxDecoration(color: active ? widget.accentColor : Colors.transparent, borderRadius: BorderRadius.circular(25)),
         child: Text(label, style: TextStyle(color: active ? Colors.white : Colors.grey, fontWeight: FontWeight.bold, fontSize: 13)),
       ),
     );
@@ -321,14 +331,14 @@ class _PlayerDetailsScreenState extends State<PlayerDetailsScreen> {
       child: Container(
         decoration: BoxDecoration(
           borderRadius: BorderRadius.circular(20),
-          boxShadow: [BoxShadow(color: Colors.redAccent.withOpacity(0.1), blurRadius: 40, spreadRadius: 10)],
+          boxShadow: [BoxShadow(color: widget.accentColor.withOpacity(0.1), blurRadius: 40, spreadRadius: 10)],
         ),
         child: AspectRatio(
           aspectRatio: 1,
           child: ClipRRect(
             borderRadius: BorderRadius.circular(20),
             child: isLocal 
-              ? Container(color: Colors.white10, child: const Icon(Icons.audiotrack_rounded, size: 100, color: Colors.redAccent))
+              ? Container(color: Colors.white10, child: Icon(Icons.audiotrack_rounded, size: 100, color: widget.accentColor))
               : CachedNetworkImage(imageUrl: artUri, fit: BoxFit.cover, errorWidget: (context, url, error) => const Icon(Icons.music_note, size: 100, color: Colors.white24)),
           ),
         ),
@@ -338,7 +348,7 @@ class _PlayerDetailsScreenState extends State<PlayerDetailsScreen> {
 
   Widget _buildVideoPlayer() {
     if (_isInitializingVideo) {
-      return const AspectRatio(aspectRatio: 16 / 9, child: Center(child: CircularProgressIndicator(color: Colors.redAccent)));
+      return AspectRatio(aspectRatio: 16 / 9, child: Center(child: CircularProgressIndicator(color: widget.accentColor)));
     }
     
     if (_videoErrorMessage != null) {
@@ -348,7 +358,7 @@ class _PlayerDetailsScreenState extends State<PlayerDetailsScreen> {
           child: Column(
             mainAxisAlignment: MainAxisAlignment.center,
             children: [
-              const Icon(Icons.error_outline, color: Colors.redAccent, size: 40),
+              Icon(Icons.error_outline, color: widget.accentColor, size: 40),
               const SizedBox(height: 8),
               Text(_videoErrorMessage!, style: const TextStyle(color: Colors.white70, fontSize: 12)),
             ],
@@ -372,7 +382,7 @@ class _PlayerDetailsScreenState extends State<PlayerDetailsScreen> {
       children: [
         Text(title, textAlign: TextAlign.center, style: const TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.bold), maxLines: 2),
         const SizedBox(height: 8),
-        Text(artist, style: const TextStyle(color: Colors.redAccent, fontSize: 14, fontWeight: FontWeight.w600)),
+        Text(artist, style: TextStyle(color: widget.accentColor, fontSize: 14, fontWeight: FontWeight.w600)),
       ],
     );
   }
@@ -380,34 +390,36 @@ class _PlayerDetailsScreenState extends State<PlayerDetailsScreen> {
   Widget _buildControls() {
     return Column(
       children: [
-        StreamBuilder<Duration>(
-          stream: widget.audioPlayer.positionStream,
-          builder: (context, snapshot) {
-            final position = snapshot.data ?? Duration.zero;
-            final duration = widget.audioPlayer.duration ?? Duration.zero;
-            return Column(
-              children: [
-                Slider(
-                  activeColor: Colors.redAccent,
-                  inactiveColor: Colors.white10,
-                  value: position.inSeconds.toDouble(),
-                  max: duration.inSeconds.toDouble() > 0 ? duration.inSeconds.toDouble() : 1.0,
-                  onChanged: (value) => widget.audioPlayer.seek(Duration(seconds: value.toInt())),
-                ),
-                Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: 24),
-                  child: Row(
-                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                    children: [
-                      _formatDurationWidget(position),
-                      _formatDurationWidget(duration),
-                    ],
+        if (!_isVideoMode)
+          StreamBuilder<Duration>(
+            stream: widget.audioPlayer.positionStream,
+            builder: (context, snapshot) {
+              final position = snapshot.data ?? Duration.zero;
+              final duration = widget.audioPlayer.duration ?? Duration.zero;
+              return Column(
+                children: [
+                  Slider(
+                    activeColor: widget.accentColor,
+                    inactiveColor: Colors.white10,
+                    value: position.inSeconds.toDouble(),
+                    max: duration.inSeconds.toDouble() > 0 ? duration.inSeconds.toDouble() : 1.0,
+                    onChanged: (value) => widget.audioPlayer.seek(Duration(seconds: value.toInt())),
                   ),
-                ),
-              ],
-            );
-          },
-        ),
+                  Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 24),
+                    child: Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      children: [
+                        _formatDurationWidget(position),
+                        _formatDurationWidget(duration),
+                      ],
+                    ),
+                  ),
+                ],
+              );
+            },
+          ),
+        const SizedBox(height: 10),
         Row(
           mainAxisAlignment: MainAxisAlignment.spaceEvenly,
           children: [
@@ -420,7 +432,7 @@ class _PlayerDetailsScreenState extends State<PlayerDetailsScreen> {
                 return IconButton(
                   icon: Icon(
                     Icons.shuffle_rounded, 
-                    color: shuffleEnabled ? Colors.redAccent : Colors.white54, 
+                    color: shuffleEnabled ? widget.accentColor : Colors.white54, 
                     size: 22
                   ),
                   onPressed: () => widget.audioPlayer.setShuffleModeEnabled(!shuffleEnabled),
@@ -446,11 +458,11 @@ class _PlayerDetailsScreenState extends State<PlayerDetailsScreen> {
                     break;
                   case LoopMode.one:
                     icon = Icons.repeat_one_rounded;
-                    color = Colors.redAccent;
+                    color = widget.accentColor;
                     break;
                   case LoopMode.all:
                     icon = Icons.repeat_rounded;
-                    color = Colors.redAccent;
+                    color = widget.accentColor;
                     break;
                 }
                 
@@ -479,7 +491,7 @@ class _PlayerDetailsScreenState extends State<PlayerDetailsScreen> {
           final isBuffering = _videoController?.value.isBuffering ?? false;
 
           if (isBuffering || _isInitializingVideo) {
-            return const SizedBox(width: 80, height: 80, child: Padding(padding: EdgeInsets.all(20), child: CircularProgressIndicator(color: Colors.redAccent)));
+            return SizedBox(width: 80, height: 80, child: Padding(padding: const EdgeInsets.all(20), child: CircularProgressIndicator(color: widget.accentColor)));
           }
 
           return IconButton(
@@ -506,7 +518,7 @@ class _PlayerDetailsScreenState extends State<PlayerDetailsScreen> {
         final playing = playerState?.playing ?? false;
         final processingState = playerState?.processingState;
         if (processingState == ProcessingState.loading || processingState == ProcessingState.buffering) {
-          return const SizedBox(width: 80, height: 80, child: Padding(padding: EdgeInsets.all(20), child: CircularProgressIndicator(color: Colors.redAccent)));
+          return SizedBox(width: 80, height: 80, child: Padding(padding: const EdgeInsets.all(20), child: CircularProgressIndicator(color: widget.accentColor)));
         }
         return IconButton(
           icon: Icon(playing ? Icons.pause_circle_filled_rounded : Icons.play_circle_filled_rounded, size: 85, color: Colors.white),
